@@ -1,6 +1,9 @@
 subroutine read_hydro_params(nml_ok)
   use amr_commons
   use hydro_commons
+#ifdef SOLVERmhd
+  use hydro_parameters, only: biermann, bstable, bfullion
+#endif
   use mpi_mod
   implicit none
   logical::nml_ok
@@ -43,6 +46,7 @@ subroutine read_hydro_params(nml_ok)
 #endif
 #ifdef SOLVERmhd
        & ,riemann2d,slope_mag_type,eta_mag &
+       & ,biermann,bstable,bfullion &
        & ,allow_switch_solver, allow_switch_solver2D &
        & ,switch_solv_B,switch_solv_dens,switch_solv_min_dens &
 #endif

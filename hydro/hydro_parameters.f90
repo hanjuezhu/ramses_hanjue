@@ -141,6 +141,14 @@ module hydro_parameters
   integer ::slope_mag_type=-1
   real(dp)::eta_mag=0
   character(LEN=10)::riemann2d='llf'
+  ! Optional Biermann-battery source in the MHD induction step.
+  ! `biermann` enables the source term and `bstable` selects the
+  ! legacy log(ne)-based discretization instead of the centered form.
+  ! `bfullion` forces the fully ionized closure instead of using
+  ! RT/non-eq chemistry ion fractions when those fields are present.
+  logical ::biermann=.false.
+  logical ::bstable=.true.
+  logical ::bfullion=.false.
   logical ::allow_switch_solver=.false.   ! enable on the fly switching 1D riemann solver hll or hlld to llf to prevent numerical crash
   logical ::allow_switch_solver2D=.false. ! switching for 2D riemann solver hlld to llf (checks only minimum density, needed in cosmology)
   real(dp)::switch_solv_B=1d20            ! value of B_tot**2/P above which to switch solver

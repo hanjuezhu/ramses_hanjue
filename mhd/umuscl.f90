@@ -74,6 +74,11 @@ subroutine mag_unsplit(uin,gravin,flux,emfx,emfy,emfz,tmp,dx,dy,dz,dt,ngrid)
   ! Intermediate fluxes
   real(dp),dimension(1:nvector,iu1:iu2,ju1:ju2,ku1:ku2)       ,save::emf
 
+  ! Edge-centered Biermann battery electric field
+  real(dp),dimension(1:nvector,if1:if2,jf1:jf2,kf1:kf2)::ebierx
+  real(dp),dimension(1:nvector,if1:if2,jf1:jf2,kf1:kf2)::ebiery
+  real(dp),dimension(1:nvector,if1:if2,jf1:jf2,kf1:kf2)::ebierz
+
   ! Local scalar variables
   integer::i,j,k,l,ivar
   integer::ilo,ihi,jlo,jhi,klo,khi
@@ -85,6 +90,13 @@ subroutine mag_unsplit(uin,gravin,flux,emfx,emfy,emfz,tmp,dx,dy,dz,dt,ngrid)
 
   ! Translate to primative variables, compute sound speeds
   call ctoprim(uin,qin,bf,gravin,dt,ngrid)
+
+#if NDIM>1
+  ebierx=zero
+  ebiery=zero
+  ebierz=zero
+  if(biermann) call biermann_battery(qin,dx,dy,dz,ngrid,ebierx,ebiery,ebierz)
+#endif
 
   ! Compute TVD slopes
   call uslope(qin,dq,bf,dbf,dx,dt,ngrid)
@@ -129,6 +141,17 @@ subroutine mag_unsplit(uin,gravin,flux,emfx,emfy,emfz,tmp,dx,dy,dz,dt,ngrid)
        &           qLT,iu1  ,iu2  ,ju1+1,ju2+1,ku1  ,ku2  , &
        &           qLB,iu1  ,iu2  ,ju1  ,ju2  ,ku1  ,ku2  , &
        &               if1  ,if2  ,jf1  ,jf2  ,klo  ,khi  , 2,3,4,6,7,8,emf,ngrid)
+  if(biermann)then
+    do k=klo,khi
+    do j=jf1,jf2
+    do i=if1,if2
+       do l=1,ngrid
+          emf(l,i,j,k)=emf(l,i,j,k)+ebierz(l,i,j,k)
+       end do
+    end do
+    end do
+    end do
+  end if
  ! Save vector in output array
   do k=klo,khi
   do j=jf1,jf2
@@ -149,6 +172,26 @@ subroutine mag_unsplit(uin,gravin,flux,emfx,emfy,emfz,tmp,dx,dy,dz,dt,ngrid)
   end do
   end do
   end do
+  if(biermann)then
+    do k=1,1
+    do j=jlo,jhi
+    do i=if1,if2
+       do l=1,ngrid
+          flux(l,i,j,k,8,1)=flux(l,i,j,k,8,1)-ebiery(l,i,j,k)*dt/dx
+       end do
+    end do
+    end do
+    end do
+    do k=1,1
+    do j=jf1,jf2
+    do i=ilo,ihi
+       do l=1,ngrid
+          flux(l,i,j,k,8,2)=flux(l,i,j,k,8,2)+ebierx(l,i,j,k)*dt/dy
+       end do
+    end do
+    end do
+    end do
+  end if
 #endif
 #endif
 
@@ -159,6 +202,17 @@ subroutine mag_unsplit(uin,gravin,flux,emfx,emfy,emfz,tmp,dx,dy,dz,dt,ngrid)
        &           qRB,iu1+1,iu2+1,ju1,ju2,ku1  ,ku2  , &
        &           qLB,iu1  ,iu2  ,ju1,ju2,ku1  ,ku2  , &
        &               if1  ,if2  ,jlo,jhi,kf1  ,kf2  , 4,2,3,8,6,7,emf,ngrid)
+  if(biermann)then
+    do k=kf1,kf2
+    do j=jlo,jhi
+    do i=if1,if2
+       do l=1,ngrid
+          emf(l,i,j,k)=emf(l,i,j,k)+ebiery(l,i,j,k)
+       end do
+    end do
+    end do
+    end do
+  end if
   ! Save vector in output array
   do k=kf1,kf2
   do j=jlo,jhi
@@ -175,6 +229,17 @@ subroutine mag_unsplit(uin,gravin,flux,emfx,emfy,emfz,tmp,dx,dy,dz,dt,ngrid)
        &           qLT,iu1,iu2,ju1  ,ju2  ,ku1+1,ku2+1, &
        &           qLB,iu1,iu2,ju1  ,ju2  ,ku1  ,ku2  , &
        &               ilo,ihi,jf1  ,jf2  ,kf1  ,kf2  , 3,4,2,7,8,6,emf,ngrid)
+  if(biermann)then
+    do k=kf1,kf2
+    do j=jf1,jf2
+    do i=ilo,ihi
+       do l=1,ngrid
+          emf(l,i,j,k)=emf(l,i,j,k)+ebierx(l,i,j,k)
+       end do
+    end do
+    end do
+    end do
+  end if
   ! Save vector in output array
   do k=kf1,kf2
   do j=jf1,jf2
@@ -2134,6 +2199,237 @@ subroutine ctoprim(uin,q,bf,gravin,dt,ngrid)
 #endif
 
 end subroutine ctoprim
+!###########################################################
+!###########################################################
+!###########################################################
+!###########################################################
+subroutine biermann_battery(q,dx,dy,dz,ngrid,ebierx,ebiery,ebierz)
+  use amr_parameters
+  use hydro_parameters
+  use constants, only: mH, c_cgs, twopi
+#ifdef RT
+  use rt_parameters, only: iIons, ixHII, ixHeII, ixHeIII, isHe
+  use cooling_module, only: X, Y
+#endif
+  implicit none
+
+  integer::ngrid, iulo, iuhi, julo, juhi, kulo, kuhi, ilo, ihi, jlo, jhi, klo, khi
+  real(dp)::dx,dy,dz
+  real(dp),dimension(1:nvector,iu1:iu2,ju1:ju2,ku1:ku2,1:nvar)::q
+  real(dp),dimension(1:nvector,iu1:iu2,ju1:ju2,ku1:ku2),save::edens
+  real(dp),dimension(1:nvector,iu1:iu2,ju1:ju2,ku1:ku2),save::ecs2
+  real(dp),dimension(1:nvector,iu1:iu2,ju1:ju2,ku1:ku2),save::ebierx_c
+  real(dp),dimension(1:nvector,iu1:iu2,ju1:ju2,ku1:ku2),save::ebiery_c
+  real(dp),dimension(1:nvector,iu1:iu2,ju1:ju2,ku1:ku2),save::ebierz_c
+  real(dp),dimension(1:nvector,if1:if2,jf1:jf2,kf1:kf2)::ebierx
+  real(dp),dimension(1:nvector,if1:if2,jf1:jf2,kf1:kf2)::ebiery
+  real(dp),dimension(1:nvector,if1:if2,jf1:jf2,kf1:kf2)::ebierz
+
+  real(dp)::gradlogr,gradcs2,cs2_e,gradp
+  real(dp),dimension(1:nvector,if1:if2,jf1:jf2,kf1:kf2),save::logr
+  real(dp),dimension(1:nvector,if1:if2,jf1:jf2,kf1:kf2),save::cs2
+
+  real(dp)::scale_l,scale_t,scale_d,scale_v,scale_nH,scale_T2,e,factor,xion,mu
+
+  integer::i, j, k, l
+
+  do k = kf1, kf2
+     do j = jf1, jf2
+        do i = if1, if2
+           do l = 1, nvector
+              ebierx(l,i,j,k) = 0d0
+              ebiery(l,i,j,k) = 0d0
+              ebierz(l,i,j,k) = 0d0
+           end do
+        end do
+     end do
+  end do
+
+  iulo=MIN(1,iu1+1); iuhi=MAX(1,iu2-1)
+  julo=MIN(1,ju1+1); juhi=MAX(1,ju2-1)
+  kulo=MIN(1,ku1+1); kuhi=MAX(1,ku2-1)
+
+  ilo=MIN(1,iu1+2); ihi=MAX(1,iu2-2)
+  jlo=MIN(1,ju1+2); jhi=MAX(1,ju2-2)
+  klo=MIN(1,ku1+2); khi=MAX(1,ku2-2)
+
+  call units(scale_l,scale_t,scale_d,scale_v,scale_nH,scale_T2)
+
+  e = 4.8032068d-10
+  factor = (c_cgs*mH/e)/sqrt(2d0*twopi*scale_d)/scale_l
+
+  do k = kulo, kuhi
+     do j = julo, juhi
+        do i = iulo, iuhi
+           do l = 1, ngrid
+#ifdef RT
+              if((rt.or.neq_chem) .and. .not.bfullion)then
+                 xion = q(l,i,j,k,iIons-1+ixHII)*X
+                 if(isHe) xion = xion + (q(l,i,j,k,iIons-1+ixHeII)+2d0*q(l,i,j,k,iIons-1+ixHeIII))*Y/4d0
+                 mu = 1d0/(xion + X + Y/4d0)
+              else
+                 xion = 1d0
+                 mu = 0.5d0
+              end if
+#else
+              xion = 1d0
+              mu = 0.5d0
+#endif
+              edens(l,i,j,k) = MAX(xion*q(l,i,j,k,1), smallr)
+              ecs2( l,i,j,k) = mu*q(l,i,j,k,5)/q(l,i,j,k,1)
+           end do
+        end do
+     end do
+  end do
+
+  if(bstable)then
+
+     do k = kf1, kf2
+        do j = jf1, jf2
+           do i = if1, if2
+              do l = 1, ngrid
+#if NDIM>2
+                 logr(l,i,j,k) = 0.125d0*(LOG(edens(l,i-1,j-1,k-1)) + LOG(edens(l,i-1,j,k-1)) + &
+                      &                    LOG(edens(l,i-1,j-1,k  )) + LOG(edens(l,i-1,j,k  )) + &
+                      &                    LOG(edens(l,i  ,j-1,k-1)) + LOG(edens(l,i  ,j,k-1)) + &
+                      &                    LOG(edens(l,i  ,j-1,k  )) + LOG(edens(l,i  ,j,k  )))
+                 cs2(l,i,j,k)  = 0.125d0*(ecs2(l,i-1,j-1,k-1) + ecs2(l,i-1,j,k-1) + &
+                      &                    ecs2(l,i-1,j-1,k  ) + ecs2(l,i-1,j,k  ) + &
+                      &                    ecs2(l,i  ,j-1,k-1) + ecs2(l,i  ,j,k-1) + &
+                      &                    ecs2(l,i  ,j-1,k  ) + ecs2(l,i  ,j,k  ))
+#else
+                 logr(l,i,j,k) = 0.25d0*(LOG(edens(l,i-1,j-1,k)) + LOG(edens(l,i,j-1,k)) + &
+                      &                   LOG(edens(l,i-1,j  ,k)) + LOG(edens(l,i,j  ,k)))
+                 cs2(l,i,j,k)  = 0.25d0*(ecs2(l,i-1,j-1,k) + ecs2(l,i,j-1,k) + &
+                      &                   ecs2(l,i-1,j  ,k) + ecs2(l,i,j  ,k))
+#endif
+              end do
+           end do
+        end do
+     end do
+
+#if NDIM>2
+     do k = klo, khi
+        do j = jf1, jf2
+           do i = if1, if2
+              do l = 1, ngrid
+                 gradlogr = (logr(l,i,j,k+1) - logr(l,i,j,k))/dz
+                 gradcs2  = ( cs2(l,i,j,k+1) -  cs2(l,i,j,k))/dz
+                 cs2_e = 0.5d0*(cs2(l,i,j,k+1) + cs2(l,i,j,k))
+                 ebierz(l,i,j,k) = factor*(gradcs2 + cs2_e*gradlogr)
+              end do
+           end do
+        end do
+     end do
+#endif
+
+     do k = kf1, kf2
+        do j = jlo, jhi
+           do i = if1, if2
+              do l = 1, ngrid
+                 gradlogr = (logr(l,i,j+1,k) - logr(l,i,j,k))/dy
+                 gradcs2  = ( cs2(l,i,j+1,k) -  cs2(l,i,j,k))/dy
+                 cs2_e = 0.5d0*(cs2(l,i,j+1,k) + cs2(l,i,j,k))
+                 ebiery(l,i,j,k) = factor*(gradcs2 + cs2_e*gradlogr)
+              end do
+           end do
+        end do
+     end do
+
+     do k = kf1, kf2
+        do j = jf1, jf2
+           do i = ilo, ihi
+              do l = 1, ngrid
+                 gradlogr = (logr(l,i+1,j,k) - logr(l,i,j,k))/dx
+                 gradcs2  = ( cs2(l,i+1,j,k) -  cs2(l,i,j,k))/dx
+                 cs2_e = 0.5d0*(cs2(l,i+1,j,k) + cs2(l,i,j,k))
+                 ebierx(l,i,j,k) = factor*(gradcs2 + cs2_e*gradlogr)
+              end do
+           end do
+        end do
+     end do
+
+  else
+
+#if NDIM>2
+     do k = klo, khi
+        do j = julo, juhi
+           do i = iulo, iuhi
+              do l = 1, ngrid
+                 gradp = (edens(l,i,j,k+1)*ecs2(l,i,j,k+1) - edens(l,i,j,k-1)*ecs2(l,i,j,k-1))/(2d0*dz)
+                 ebierz_c(l,i,j,k) = factor*gradp/edens(l,i,j,k)
+              end do
+           end do
+        end do
+     end do
+
+     do k = klo, khi
+        do j = jf1, jf2
+           do i = if1, if2
+              do l = 1, ngrid
+                 ebierz(l,i,j,k) = 0.25d0*(ebierz_c(l,i-1,j-1,k) + ebierz_c(l,i-1,j,k) + &
+                      &                    ebierz_c(l,i,j-1,k) + ebierz_c(l,i,j,k))
+              end do
+           end do
+        end do
+     end do
+#endif
+
+     do k = kulo, kuhi
+        do j = jlo, jhi
+           do i = iulo, iuhi
+              do l = 1, ngrid
+                 gradp = (edens(l,i,j+1,k)*ecs2(l,i,j+1,k) - edens(l,i,j-1,k)*ecs2(l,i,j-1,k))/(2d0*dy)
+                 ebiery_c(l,i,j,k) = factor*gradp/edens(l,i,j,k)
+              end do
+           end do
+        end do
+     end do
+
+     do k = kf1, kf2
+        do j = jlo, jhi
+           do i = if1, if2
+              do l = 1, ngrid
+#if NDIM>2
+                 ebiery(l,i,j,k) = 0.25d0*(ebiery_c(l,i-1,j,k-1) + ebiery_c(l,i-1,j,k) + &
+                      &                    ebiery_c(l,i,j,k-1) + ebiery_c(l,i,j,k))
+#else
+                 ebiery(l,i,j,k) = 0.5d0*(ebiery_c(l,i-1,j,k) + ebiery_c(l,i,j,k))
+#endif
+              end do
+           end do
+        end do
+     end do
+
+     do k = kulo, kuhi
+        do j = julo, juhi
+           do i = ilo, ihi
+              do l = 1, ngrid
+                 gradp = (edens(l,i+1,j,k)*ecs2(l,i+1,j,k) - edens(l,i-1,j,k)*ecs2(l,i-1,j,k))/(2d0*dx)
+                 ebierx_c(l,i,j,k) = factor*gradp/edens(l,i,j,k)
+              end do
+           end do
+        end do
+     end do
+
+     do k = kf1, kf2
+        do j = jf1, jf2
+           do i = ilo, ihi
+              do l = 1, ngrid
+#if NDIM>2
+                 ebierx(l,i,j,k) = 0.25d0*(ebierx_c(l,i,j-1,k-1) + ebierx_c(l,i,j-1,k) + &
+                      &                    ebierx_c(l,i,j,k-1) + ebierx_c(l,i,j,k))
+#else
+                 ebierx(l,i,j,k) = 0.5d0*(ebierx_c(l,i,j-1,k) + ebierx_c(l,i,j,k))
+#endif
+              end do
+           end do
+        end do
+     end do
+
+  end if
+
+end subroutine biermann_battery
 !###########################################################
 !###########################################################
 !###########################################################
